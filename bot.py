@@ -20,14 +20,20 @@ secret_key = os.getenv('ALPACA_SECRET_KEY')
 cliente_trading = TradingClient(api_key, secret_key, paper=True)
 cliente_datos = StockHistoricalDataClient(api_key, secret_key)
 
-# --- 2. ESTADO DE LA CUENTA ---
+# --- 2. ESTADO DE LA CUENTA (CON FRENO DE MANO) ---
 try:
     cuenta = cliente_trading.get_account()
-    saldo = float(cuenta.buying_power)
-    posiciones = [p.symbol for p in cliente_trading.get_all_positions()]
-    print(f"Caja disponible: {saldo:.2f} $")
+    # Usamos 'cash' en vez de 'buying_power' para evitar el dinero prestado
+    dinero_real = float(cuenta.cash)
+    posiciones_actuales = {p.symbol: p for p in cliente_trading.get_all_positions()}
+    
+    # Solo vamos a arriesgar el 80% del total para tener siempre un colchón
+    presupuesto_total = dinero_real * 0.80
+    
+    print(f"Efectivo real en caja: {dinero_real:.2f} $")
+    print(f"Presupuesto máximo para hoy: {presupuesto_total:.2f} $")
 except Exception as e:
-    print(f"Error de conexión: {e}")
+    print(f"Error al mirar la caja: {e}")
     exit(1)
 
 # --- 3. BÚSQUEDA DE OPORTUNIDADES ---
@@ -35,15 +41,11 @@ try:
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
     header = {'User-Agent': 'Mozilla/5.0'}
     res = requests.get(url, headers=header).text
-    
-    # El truco está aquí: usar io.StringIO para que pandas no se líe
     tabla = pd.read_html(io.StringIO(res))[0]
     simbolos = [s for s in tabla['Symbol'].tolist() if '.' not in s and '-' not in s]
 except Exception as e:
-    print(f"Error al leer la lista de empresas: {e}")
+    print(f"Error con la Wikipedia: {e}")
     exit(1)
-
-print(f"Analizando {len(simbolos)} activos...")
 
 params = StockBarsRequest(
     symbol_or_symbols=simbolos,
@@ -56,11 +58,10 @@ params = StockBarsRequest(
 try:
     velas = cliente_datos.get_stock_bars(params)
     df_mercado = velas.df
-except Exception as e:
-    print(f"No se han podido descargar datos hoy: {e}")
+except:
+    print("No hay datos de mercado ahora mismo.")
     exit(0)
 
-# Filtrar volumen anormal
 calientes = []
 for ticker in simbolos:
     try:
@@ -69,20 +70,26 @@ for ticker in simbolos:
             if len(d) > 20:
                 media = d['volume'][:-1].mean()
                 hoy = d['volume'].iloc[-1]
-                if media > 0:
+                if media > 0 and hoy > media * 1.5:
                     calientes.append({'Activo': ticker, 'Ratio': hoy / media})
     except: continue
 
 if not calientes:
-    print("No se han detectado movimientos inusuales.")
+    print("Hoy el mercado está tranquilito, no compro nada.")
     exit(0)
 
-top_20 = pd.DataFrame(calientes).sort_values(by='Ratio', ascending=False).head(20)['Activo'].tolist()
-print(f"Activos con mayor volumen hoy: {top_20}")
+# Cogemos el Top 10 para no dispersar mucho el dinero
+top_picks = pd.DataFrame(calientes).sort_values(by='Ratio', ascending=False).head(10)['Activo'].tolist()
+print(f"Candidatos de hoy: {top_picks}")
 
-# --- 4. EJECUCIÓN ---
-presupuesto = saldo * 0.15
-for activo in top_20:
+# --- 4. OPERATIVA CONTROLADA ---
+# Dividimos el presupuesto total entre el número de candidatos
+if len(top_picks) > 0:
+    dinero_por_accion = presupuesto_total / len(top_picks)
+else:
+    dinero_por_accion = 0
+
+for activo in top_picks:
     try:
         datos = df_mercado.loc[activo].copy()
         datos['retorno'] = datos['close'].pct_change()
@@ -91,7 +98,7 @@ for activo in top_20:
         datos['m20'] = datos['close'].rolling(20).mean()
         datos = datos.dropna()
         
-        if len(datos) < 5: continue
+        if len(datos) < 10: continue
         
         X = datos[['m5', 'm20', 'retorno']]
         y = datos['obj']
@@ -99,18 +106,23 @@ for activo in top_20:
         model.fit(X[:-1], y[:-1])
         
         pred = model.predict(X.iloc[-1:])[0]
-        precio = datos['close'].iloc[-1]
+        precio_actual = datos['close'].iloc[-1]
         
-        if pred == 1 and activo not in posiciones:
-            cant = math.floor(presupuesto / precio)
-            if cant > 0:
+        # Lógica de compra: si la IA dice sí y no la tenemos ya
+        if pred == 1 and activo not in posiciones_actuales:
+            cantidad = math.floor(dinero_por_accion / precio_actual)
+            if cantidad > 0:
                 cliente_trading.submit_order(MarketOrderRequest(
-                    symbol=activo, qty=cant, side=OrderSide.BUY, time_in_force=TimeInForce.DAY
+                    symbol=activo, qty=cantidad, side=OrderSide.BUY, time_in_force=TimeInForce.DAY
                 ))
-                print(f"Comprando: {activo}")
-        elif pred == 0 and activo in posiciones:
+                print(f"COMPRA: {activo} ({cantidad} acciones a {precio_actual:.2f}$)")
+        
+        # Lógica de venta: si la IA dice no y la tenemos en cartera
+        elif pred == 0 and activo in posiciones_actuales:
             cliente_trading.close_position(activo)
-            print(f"Vendiendo: {activo}")
-    except: continue
+            print(f"VENTA: {activo} por cambio de tendencia.")
+            
+    except Exception as e:
+        continue
 
-print("Proceso finalizado correctamente.")
+print("Jornada terminada. Todo bajo control.")
