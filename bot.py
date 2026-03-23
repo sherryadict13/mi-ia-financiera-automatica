@@ -23,11 +23,10 @@ cliente_datos = StockHistoricalDataClient(api_key, secret_key)
 # --- 2. ESTADO DE LA CUENTA (CON FRENO DE MANO) ---
 try:
     cuenta = cliente_trading.get_account()
-    # Usamos 'cash' en vez de 'buying_power' para evitar el dinero prestado
     dinero_real = float(cuenta.cash)
     posiciones_actuales = {p.symbol: p for p in cliente_trading.get_all_positions()}
     
-    # Solo vamos a arriesgar el 80% del total para tener siempre un colchón
+    # Presupuesto controlado
     presupuesto_total = dinero_real * 0.80
     
     print(f"Efectivo real en caja: {dinero_real:.2f} $")
@@ -82,8 +81,7 @@ if not calientes:
 top_picks = pd.DataFrame(calientes).sort_values(by='Ratio', ascending=False).head(10)['Activo'].tolist()
 print(f"Candidatos de hoy: {top_picks}")
 
-# --- 4. OPERATIVA CONTROLADA ---
-# Dividimos el presupuesto total entre el número de candidatos
+# --- 4. OPERATIVA AVANZADA (CON RSI Y VOLATILIDAD) ---
 if len(top_picks) > 0:
     dinero_por_accion = presupuesto_total / len(top_picks)
 else:
@@ -93,22 +91,38 @@ for activo in top_picks:
     try:
         datos = df_mercado.loc[activo].copy()
         datos['retorno'] = datos['close'].pct_change()
+        
+        # Objetivo
         datos['obj'] = (datos['retorno'].shift(-1) > 0).astype(int)
+        
+        # Tendencia
         datos['m5'] = datos['close'].rolling(5).mean()
         datos['m20'] = datos['close'].rolling(20).mean()
+        
+        # Volatilidad
+        datos['volatilidad'] = datos['retorno'].rolling(10).std()
+        
+        # RSI
+        delta = datos['close'].diff()
+        ganancia = delta.where(delta > 0, 0).rolling(14).mean()
+        perdida = -delta.where(delta < 0, 0).rolling(14).mean()
+        rs = ganancia / perdida
+        datos['rsi'] = 100 - (100 / (1 + rs))
+        
         datos = datos.dropna()
         
-        if len(datos) < 10: continue
+        if len(datos) < 20: continue
         
-        X = datos[['m5', 'm20', 'retorno']]
+        # IA entrenada con 5 indicadores y max_depth
+        X = datos[['m5', 'm20', 'retorno', 'volatilidad', 'rsi']]
         y = datos['obj']
-        model = RandomForestClassifier(n_estimators=50, random_state=42)
+        model = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
         model.fit(X[:-1], y[:-1])
         
         pred = model.predict(X.iloc[-1:])[0]
         precio_actual = datos['close'].iloc[-1]
         
-        # Lógica de compra: si la IA dice sí y no la tenemos ya
+        # Compra
         if pred == 1 and activo not in posiciones_actuales:
             cantidad = math.floor(dinero_por_accion / precio_actual)
             if cantidad > 0:
@@ -117,7 +131,7 @@ for activo in top_picks:
                 ))
                 print(f"COMPRA: {activo} ({cantidad} acciones a {precio_actual:.2f}$)")
         
-        # Lógica de venta: si la IA dice no y la tenemos en cartera
+        # Venta
         elif pred == 0 and activo in posiciones_actuales:
             cliente_trading.close_position(activo)
             print(f"VENTA: {activo} por cambio de tendencia.")
