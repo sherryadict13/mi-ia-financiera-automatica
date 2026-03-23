@@ -1,4 +1,5 @@
 import os
+import io
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -12,36 +13,38 @@ from sklearn.ensemble import RandomForestClassifier
 import math
 import requests
 
-# --- 1. CONEXIÓN CON LAS LLAVES ---
+# --- 1. CONEXIÓN ---
 api_key = os.getenv('ALPACA_API_KEY')
 secret_key = os.getenv('ALPACA_SECRET_KEY')
-
-if not api_key or not secret_key:
-    print("ERROR: No encuentro las llaves en la caja fuerte de GitHub.")
-    exit(1)
 
 cliente_trading = TradingClient(api_key, secret_key, paper=True)
 cliente_datos = StockHistoricalDataClient(api_key, secret_key)
 
-# --- 2. ESTADO DE LA CAJA ---
+# --- 2. ESTADO DE LA CUENTA ---
 try:
     cuenta = cliente_trading.get_account()
     saldo = float(cuenta.buying_power)
     posiciones = [p.symbol for p in cliente_trading.get_all_positions()]
-    print(f"Caja: {saldo:.2f} $ | Cartera: {posiciones}")
+    print(f"Caja disponible: {saldo:.2f} $")
 except Exception as e:
-    print(f"Error al conectar con Alpaca: {e}")
+    print(f"Error de conexión: {e}")
     exit(1)
 
-# --- 3. ESCÁNER DE OPORTUNIDADES ---
-print("Buscando empresas en el S&P 500...")
-url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-header = {'User-Agent': 'Mozilla/5.0'}
-res = requests.get(url, headers=header).text
-tabla = pd.read_html(res)[0]
-simbolos = [s for s in tabla['Symbol'].tolist() if '.' not in s and '-' not in s]
+# --- 3. BÚSQUEDA DE OPORTUNIDADES ---
+try:
+    url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+    header = {'User-Agent': 'Mozilla/5.0'}
+    res = requests.get(url, headers=header).text
+    
+    # El truco está aquí: usar io.StringIO para que pandas no se líe
+    tabla = pd.read_html(io.StringIO(res))[0]
+    simbolos = [s for s in tabla['Symbol'].tolist() if '.' not in s and '-' not in s]
+except Exception as e:
+    print(f"Error al leer la lista de empresas: {e}")
+    exit(1)
 
-print(f"Analizando volumen de {len(simbolos)} empresas...")
+print(f"Analizando {len(simbolos)} activos...")
+
 params = StockBarsRequest(
     symbol_or_symbols=simbolos,
     timeframe=TimeFrame.Day,
@@ -50,14 +53,14 @@ params = StockBarsRequest(
     feed=DataFeed.IEX 
 )
 
-velas = cliente_datos.get_stock_bars(params)
-df_mercado = velas.df
-
-if df_mercado.empty:
-    print("Hoy no hay datos frescos en el mercado. Seguramente esté cerrado.")
+try:
+    velas = cliente_datos.get_stock_bars(params)
+    df_mercado = velas.df
+except Exception as e:
+    print(f"No se han podido descargar datos hoy: {e}")
     exit(0)
 
-# Buscamos el volumen anormal
+# Filtrar volumen anormal
 calientes = []
 for ticker in simbolos:
     try:
@@ -70,10 +73,14 @@ for ticker in simbolos:
                     calientes.append({'Activo': ticker, 'Ratio': hoy / media})
     except: continue
 
-top_20 = pd.DataFrame(calientes).sort_values(by='Ratio', ascending=False).head(20)['Activo'].tolist()
-print(f"Foco del dinero hoy en: {top_20}")
+if not calientes:
+    print("No se han detectado movimientos inusuales.")
+    exit(0)
 
-# --- 4. OPERATIVA ---
+top_20 = pd.DataFrame(calientes).sort_values(by='Ratio', ascending=False).head(20)['Activo'].tolist()
+print(f"Activos con mayor volumen hoy: {top_20}")
+
+# --- 4. EJECUCIÓN ---
 presupuesto = saldo * 0.15
 for activo in top_20:
     try:
@@ -100,10 +107,10 @@ for activo in top_20:
                 cliente_trading.submit_order(MarketOrderRequest(
                     symbol=activo, qty=cant, side=OrderSide.BUY, time_in_force=TimeInForce.DAY
                 ))
-                print(f"COMPRA: {activo} ({cant} acciones)")
+                print(f"Comprando: {activo}")
         elif pred == 0 and activo in posiciones:
             cliente_trading.close_position(activo)
-            print(f"VENTA: {activo}")
+            print(f"Vendiendo: {activo}")
     except: continue
 
-print("Operativa finalizada.")
+print("Proceso finalizado correctamente.")
