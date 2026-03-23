@@ -17,7 +17,7 @@ jobs:
           python-version: '3.12'
 
       - name: Instalar librerias necesarias
-        run: pip install alpaca-py pandas sklearn requests lxml
+       run: pip install alpaca-py pandas scikit-learn requests lxml
 
       - name: Arrancar el bot
         env:
