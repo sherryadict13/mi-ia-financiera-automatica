@@ -1,8 +1,9 @@
 name: Ejecutar Radar Financiero
+
 on:
   schedule:
-    - cron: '15 14 * * 1-5' # Se ejecuta a las 15:15h (hora de España) de lunes a viernes
-  workflow_dispatch: # ESTO es el botón de "Play" manual para probarlo ahora
+    - cron: '15 14 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   ejecucion:
@@ -17,7 +18,7 @@ jobs:
           python-version: '3.12'
 
       - name: Instalar librerias necesarias
-       run: pip install alpaca-py pandas scikit-learn requests lxml
+        run: pip install alpaca-py pandas scikit-learn requests lxml
 
       - name: Arrancar el bot
         env:
