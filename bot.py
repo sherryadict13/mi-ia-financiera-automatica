@@ -12,94 +12,98 @@ from sklearn.ensemble import RandomForestClassifier
 import math
 import requests
 
-# --- 1. LAS LLAVES DEL CORTIJO (Ahora desde la caja fuerte de GitHub) ---
+# --- 1. CONEXIÓN CON LAS LLAVES ---
 api_key = os.getenv('ALPACA_API_KEY')
 secret_key = os.getenv('ALPACA_SECRET_KEY')
+
+if not api_key or not secret_key:
+    print("ERROR: No encuentro las llaves en la caja fuerte de GitHub.")
+    exit(1)
 
 cliente_trading = TradingClient(api_key, secret_key, paper=True)
 cliente_datos = StockHistoricalDataClient(api_key, secret_key)
 
-# --- 2. CONTROL DE CAJA Y STOCK ---
-cuenta = cliente_trading.get_account()
-saldo_disponible = float(cuenta.buying_power)
+# --- 2. ESTADO DE LA CAJA ---
+try:
+    cuenta = cliente_trading.get_account()
+    saldo = float(cuenta.buying_power)
+    posiciones = [p.symbol for p in cliente_trading.get_all_positions()]
+    print(f"Caja: {saldo:.2f} $ | Cartera: {posiciones}")
+except Exception as e:
+    print(f"Error al conectar con Alpaca: {e}")
+    exit(1)
 
-posiciones_abiertas = cliente_trading.get_all_positions()
-cartera_actual = [posicion.symbol for posicion in posiciones_abiertas]
+# --- 3. ESCÁNER DE OPORTUNIDADES ---
+print("Buscando empresas en el S&P 500...")
+url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+header = {'User-Agent': 'Mozilla/5.0'}
+res = requests.get(url, headers=header).text
+tabla = pd.read_html(res)[0]
+simbolos = [s for s in tabla['Symbol'].tolist() if '.' not in s and '-' not in s]
 
-print(f"--- ESTADO DE LA CAJA ---")
-print(f"Saldo para gastar: {saldo_disponible:.2f} $")
-print(f"Acciones en cartera: {cartera_actual}\n")
-
-# --- 3. EL EMBUDO INTELIGENTE: BUSCANDO EL RASTRO DEL DINERO ---
-url_wiki = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-cabecera = {'User-Agent': 'Mozilla/5.0'}
-respuesta = requests.get(url_wiki, headers=cabecera).text
-
-tabla_sp500 = pd.read_html(respuesta)[0]
-todos_los_simbolos = tabla_sp500['Symbol'].tolist()
-todos_los_simbolos = [s for s in todos_los_simbolos if '.' not in s and '-' not in s]
-
-print("Escaneando el mercado en busca de volumen anormal...")
-
-parametros_volumen = StockBarsRequest(
-    symbol_or_symbols=todos_los_simbolos,
+print(f"Analizando volumen de {len(simbolos)} empresas...")
+params = StockBarsRequest(
+    symbol_or_symbols=simbolos,
     timeframe=TimeFrame.Day,
     start=datetime.now() - timedelta(days=40),
     end=datetime.now(),
     feed=DataFeed.IEX 
 )
 
-velas_mercado = cliente_datos.get_stock_bars(parametros_volumen)
-tabla_mercado = velas_mercado.df
+velas = cliente_datos.get_stock_bars(params)
+df_mercado = velas.df
 
-lista_calientes = []
-for activo in todos_los_simbolos:
+if df_mercado.empty:
+    print("Hoy no hay datos frescos en el mercado. Seguramente esté cerrado.")
+    exit(0)
+
+# Buscamos el volumen anormal
+calientes = []
+for ticker in simbolos:
     try:
-        if activo in tabla_mercado.index:
-            datos = tabla_mercado.loc[activo]
-            if len(datos) > 20:
-                media_vol = datos['volume'][:-1].mean()
-                vol_hoy = datos['volume'].iloc[-1]
-                if media_vol > 0:
-                    ratio = vol_hoy / media_vol
-                    lista_calientes.append({'Activo': activo, 'Ratio': ratio})
+        if ticker in df_mercado.index:
+            d = df_mercado.loc[ticker]
+            if len(d) > 20:
+                media = d['volume'][:-1].mean()
+                hoy = d['volume'].iloc[-1]
+                if media > 0:
+                    calientes.append({'Activo': ticker, 'Ratio': hoy / media})
     except: continue
 
-df_calientes = pd.DataFrame(lista_calientes).sort_values(by='Ratio', ascending=False)
-top_20 = df_calientes.head(20)['Activo'].tolist()
-print(f"Radar detectó movimiento en: {top_20}")
+top_20 = pd.DataFrame(calientes).sort_values(by='Ratio', ascending=False).head(20)['Activo'].tolist()
+print(f"Foco del dinero hoy en: {top_20}")
 
-# --- 4. DECISIONES Y ÓRDENES ---
-presupuesto_por_accion = saldo_disponible * 0.15
-
+# --- 4. OPERATIVA ---
+presupuesto = saldo * 0.15
 for activo in top_20:
     try:
-        datos_activo = tabla_mercado.loc[activo].copy()
-        datos_activo['retorno'] = datos_activo['close'].pct_change()
-        datos_activo['objetivo'] = (datos_activo['retorno'].shift(-1) > 0).astype(int)
-        datos_activo['media_5d'] = datos_activo['close'].rolling(window=5).mean()
-        datos_activo['media_20d'] = datos_activo['close'].rolling(window=20).mean()
-        datos_activo = datos_activo.dropna()
+        datos = df_mercado.loc[activo].copy()
+        datos['retorno'] = datos['close'].pct_change()
+        datos['obj'] = (datos['retorno'].shift(-1) > 0).astype(int)
+        datos['m5'] = datos['close'].rolling(5).mean()
+        datos['m20'] = datos['close'].rolling(20).mean()
+        datos = datos.dropna()
         
-        X = datos_activo[['media_5d', 'media_20d', 'retorno']]
-        y = datos_activo['objetivo']
-        modelo = RandomForestClassifier(n_estimators=100, random_state=42)
-        modelo.fit(X[:-1], y[:-1])
+        if len(datos) < 5: continue
         
-        decision = modelo.predict(X.iloc[-1:])[0]
-        precio = datos_activo['close'].iloc[-1]
+        X = datos[['m5', 'm20', 'retorno']]
+        y = datos['obj']
+        model = RandomForestClassifier(n_estimators=50, random_state=42)
+        model.fit(X[:-1], y[:-1])
         
-        if decision == 0 and activo in cartera_actual:
-            cliente_trading.close_position(activo)
-            print(f"[{activo}] Señal QUIETO. Vendiendo.")
-        elif decision == 1 and activo not in cartera_actual:
-            cant = math.floor(presupuesto_por_accion / precio)
+        pred = model.predict(X.iloc[-1:])[0]
+        precio = datos['close'].iloc[-1]
+        
+        if pred == 1 and activo not in posiciones:
+            cant = math.floor(presupuesto / precio)
             if cant > 0:
-                orden = MarketOrderRequest(symbol=activo, qty=cant, side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
-                cliente_trading.submit_order(order_data=orden)
-                print(f"[{activo}] Señal COMPRA. Orden enviada por {cant} acciones.")
-        else:
-            print(f"[{activo}] Sin cambios.")
+                cliente_trading.submit_order(MarketOrderRequest(
+                    symbol=activo, qty=cant, side=OrderSide.BUY, time_in_force=TimeInForce.DAY
+                ))
+                print(f"COMPRA: {activo} ({cant} acciones)")
+        elif pred == 0 and activo in posiciones:
+            cliente_trading.close_position(activo)
+            print(f"VENTA: {activo}")
     except: continue
 
-print("\n--- OPERATIVA TERMINADA ---")
+print("Operativa finalizada.")
