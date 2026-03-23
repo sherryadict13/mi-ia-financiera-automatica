@@ -1,0 +1,26 @@
+name: Ejecutar Radar Financiero
+on:
+  schedule:
+    - cron: '15 14 * * 1-5' # Se ejecuta a las 15:15h (hora de España) de lunes a viernes
+  workflow_dispatch: # ESTO es el botón de "Play" manual para probarlo ahora
+
+jobs:
+  ejecucion:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Instalar librerias necesarias
+        run: pip install alpaca-py pandas sklearn requests lxml
+
+      - name: Arrancar el bot
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: python bot.py
